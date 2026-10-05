@@ -12,7 +12,10 @@
 
 规范化 JSON 为单行、无多余空白、键固定按
 ``[start, end, segments: [[start, end, responsible_party], ...]]``
-排列，时间统一为 UTC ISO 8601（``YYYY-MM-DDTHH:MM:SSZ``）。
+排列，时间统一为 UTC ISO 8601：整秒时刻为 ``YYYY-MM-DDTHH:MM:SSZ``
+（与对外时间格式一致，既有整秒快照标识不变），含亚秒时追加 6 位微秒
+（``...SS.ffffffZ``）——亚秒级的区间边界 / 片段变化（如 10:00:01.900
+闭合后又补录 10:00:01.100 的正常读数使闭合提前）会产生不同的快照标识。
 
 表态有效性（晚到事件 / 晚到车载读数重建后）
 -------------------------------------------
@@ -24,6 +27,13 @@
 * 快照完全不变 → 全部继续有效。
 
 失效表态的历史仍可经表态历史接口查询。
+
+旧表态记录的时间精度
+--------------------
+历史表态的 ``attested_segments`` 不可改写。亚秒精度生效前写入的旧记录
+只含整秒坐标（精度已丢失）：当前区间边界 / 片段含亚秒时，旧坐标无法证实
+片段仍相同，该旧表态一律判为失效（``is_current=false``）；当前区间坐标
+均为整秒且与旧记录一致时，旧表态维持原有有效判定（整秒标识与格式不变）。
 """
 from __future__ import annotations
 
@@ -35,7 +45,7 @@ from decimal import Decimal
 
 from app.chain import ExcursionResult, interval_id
 from app.models import Stance, StanceKind
-from app.timeutil import ensure_utc
+from app.timeutil import ensure_utc, format_utc
 
 # 汇总状态
 ALL_CONFIRMED = "all_confirmed"  # 全部责任方均已确认
@@ -44,9 +54,8 @@ PENDING = "pending"              # 尚有责任方未表态（且无异议）
 
 
 def _ts(dt: datetime) -> str:
-    """UTC ISO 8601 秒级，Z 后缀（与对外时间格式一致）。"""
-    dt = ensure_utc(dt).replace(microsecond=0)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC ISO 8601：整秒 ``...SSZ``，亚秒 ``...SS.ffffffZ``（与对外时间格式一致）。"""
+    return format_utc(dt)
 
 
 def _segment_triples(segments) -> list:
@@ -135,7 +144,9 @@ def is_stance_current(stance: Stance, ex: ExcursionResult | None) -> bool:
     """表态是否对当前重建结果仍然有效（逐片段判定）。
 
     * 区间不存在 / 未闭合 / 区间标识变化（开启读数来源或坐标变化）→ False；
-    * 表态时该责任方的片段坐标与当前不一致（边界或责任片段变化）→ False；
+    * 表态时该责任方的片段坐标与当前不一致（边界或责任片段变化）→ False
+      ——坐标按实际时刻比较（亚秒级差异即为不一致）；旧记录只存整秒坐标、
+      当前片段含亚秒时无法证实片段仍相同，同样判 False；
     * 区间标识与片段坐标完全一致（未受晚到记录影响）→ True。
     """
     if ex is None or ex.is_open:

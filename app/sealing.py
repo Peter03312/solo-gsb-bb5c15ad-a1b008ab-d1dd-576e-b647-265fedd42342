@@ -26,8 +26,11 @@
     content_digest = "sha256:" + hex(sha256(canonical_json))
 
 规范化 JSON 为单行、无多余空白（``separators=(",", ":")``），非 ASCII 不转义；
-时间统一为 UTC ISO 8601 秒级（``YYYY-MM-DDTHH:MM:SSZ``），温度量化到
-千分位十进制字符串。封存包原文与摘要一同落库，此后不可改。
+时间统一为 UTC ISO 8601：整秒时刻为 ``YYYY-MM-DDTHH:MM:SSZ``（既有整秒
+封存内容格式不变），含亚秒时追加 6 位微秒（``...SS.ffffffZ``）——新封存包
+按实际时刻记录亚秒边界，亚秒级变化（如闭合时刻从 10:00:01.900 提前到
+10:00:01.100）在快照标识与封存证据时间中可区分；温度量化到千分位十进制
+字符串。封存包原文与摘要一同落库，此后不可改。
 
 现况对照（diff）
 ----------------
@@ -35,13 +38,23 @@
 
 * ``unchanged``：区间仍存在、已闭合且快照标识与封存时相同——证据项无
   增删变更（封存内容本就是该视图的确定性投影）；
-* ``changed``：区间仍闭合但快照已变（边界 / 责任片段变化）；
+* ``changed``：区间仍闭合但快照已变（边界 / 责任片段变化，含亚秒级变化）；
 * ``reopened``：同标识区间当前为开放区间；
 * ``disappeared``：同标识区间当前既不闭合也不开放（已消失）。
 
 对照按封存时相同的证据范围逐项比较，列出**证据项**（自有事件 / 车载读数
 / 装卸窗口）与**责任片段**的新增 / 删除 / 变更；晚到记录与测温 / 装卸
 更正只影响对照结果，**绝不改写封存原包**。
+
+旧封存包的时间精度
+~~~~~~~~~~~~~~~~~~
+亚秒精度生效前封存的旧包只含整秒时间（精度已丢失），原包与摘要不可改写。
+对照时当前状态按实际时刻（含亚秒）重建：当前区间边界 / 片段 / 证据时刻
+含亚秒时，旧包的整秒坐标无法证实仍相同——快照标识必然不同，对照记为
+``changed``，并在 ``segment_changes`` / ``evidence_changes`` 中以整秒
+旧值对亚秒新值逐项呈现（不认定为 ``unchanged``）；当前状态各时刻均为
+整秒且与旧包一致时，快照标识相同，对照仍为 ``unchanged``（整秒标识与
+格式不变）。
 
 隔离读数的对照语义
 ~~~~~~~~~~~~~~~~~~
@@ -69,7 +82,7 @@ from decimal import Decimal
 
 from app import chain, responsibility as resp, timeline
 from app.chain import interval_id
-from app.timeutil import ensure_utc
+from app.timeutil import ensure_utc, format_utc
 
 # 封存后现况状态
 STATUS_UNCHANGED = "unchanged"        # 区间仍闭合且快照相同
@@ -89,9 +102,8 @@ _TEMP_SCALE = Decimal("0.001")
 
 
 def ts(dt) -> str:
-    """UTC ISO 8601 秒级，Z 后缀（封存内容时间的统一表示）。"""
-    dt = ensure_utc(dt).replace(microsecond=0)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC ISO 8601：整秒 ``...SSZ``，亚秒 ``...SS.ffffffZ``（封存内容时间的统一表示）。"""
+    return format_utc(dt)
 
 
 def temp(value) -> str:
@@ -262,7 +274,9 @@ def scoped_evidence(
     #   包核对“该读数为何不参与越温重建”的隔离依据（重叠故障撤销一条后
     #   覆盖集合的变化在对照中逐项体现）。
     # adopted 口径与 timeline.merged_timeline 一致：同刻无自有测温且未隔离。
-    reading_items = []
+    # 排序按实际时刻（datetime）而非格式化字符串：整秒 "...SSZ" 与亚秒
+    # "...SS.ffffffZ" 混合时字符串序与时间序不一致。
+    reading_rows = []
     for r in readings:
         read_at = ensure_utc(r.read_at)
         if lower is not None and read_at < lower:
@@ -274,21 +288,24 @@ def scoped_evidence(
             continue
         covers = tuple(reading_quarantine.get(r.reading_id, ()))
         adopted = read_at not in own_measure_at and not covers
-        reading_items.append(
-            _reading_item(r, reading_effective, adopted, covers, _limit_for)
-        )
-    reading_items.sort(key=lambda x: (x["read_at"], x["reading_id"]))
+        item = _reading_item(r, reading_effective, adopted, covers, _limit_for)
+        reading_rows.append((read_at, r.reading_id, item))
+    reading_rows.sort(key=lambda x: (x[0], x[1]))
+    reading_items = [item for _, _, item in reading_rows]
 
     # 装卸窗口：与 [lower, span_end] 相交（unload>下界 且 load<=上界）。
-    loading_items = []
+    loading_rows = []
     for l in loadings:
         lo, un = ensure_utc(l.loaded_at), ensure_utc(l.unloaded_at)
         if lower is not None and un <= lower:
             continue
         if span_end is not None and lo > span_end:
             continue
-        loading_items.append(_loading_item(l))
-    loading_items.sort(key=lambda x: (x["trip_id"], x["origin_loaded_at"]))
+        loading_rows.append(
+            (l.trip_id, ensure_utc(l.origin_loaded_at), _loading_item(l))
+        )
+    loading_rows.sort(key=lambda x: (x[0], x[1]))
+    loading_items = [item for _, _, item in loading_rows]
 
     return own_items, reading_items, loading_items
 
