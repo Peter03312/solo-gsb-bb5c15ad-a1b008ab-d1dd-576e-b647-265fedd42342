@@ -1122,5 +1122,96 @@ def main() -> None:
               api.get("/cargo/NO-SUCH-CARGO/blind-spots", params=params).status_code)
 
 
+def subsecond_demo() -> None:
+    """亚秒测温 / 交接：区间快照、表态有效性与封存对照按实际时刻区分。
+
+    先有 10:00:01.900 的正常读数闭合并表态 / 封存，后补录 10:00:01.100 的
+    正常读数使区间提前闭合——快照变化、旧表态失效、旧快照被拒、封存对照
+    报 changed，原封存包不变。请求路径 / 字段与整秒完全相同。
+    """
+    with httpx.Client(base_url=BASE, timeout=10) as api:
+        sc = "COLD-SUBSEC-1"
+        show(
+            "亚秒示例-创建货物",
+            api.post(
+                "/cargo",
+                json={
+                    "cargo_id": sc,
+                    "started_at": "2026-10-05T09:00:00+08:00",
+                    "temp_upper_limit": "4.0",
+                    "initial_holder": "北京冷库",
+                },
+            ),
+        )
+        for eid, at, extra in [
+            ("ss-m0", "2026-10-05T10:00:00.000+08:00", {"temperature": "8.2"}),
+            ("ss-h0", "2026-10-05T10:00:00.500+08:00",
+             {"giver": "北京冷库", "receiver": "上海冷库"}),
+            ("ss-m9", "2026-10-05T10:00:01.900+08:00", {"temperature": "3.1"}),
+        ]:
+            show(
+                f"亚秒事件 {eid} {at[11:]}",
+                api.post(
+                    "/events",
+                    json={"event_id": eid, "cargo_id": sc,
+                          "occurred_at": at, **extra},
+                ),
+            )
+
+        iv = api.get(f"/cargo/{sc}/responsibilities/ss-m0").json()
+        snap = iv["snapshot_id"]
+        print("\n== 亚秒区间（整秒起点秒级 Z；end/交接片段带六位微秒） ==")
+        print("    start =", iv["start"], " end =", iv["end"])
+        print("    snapshot =", snap)
+
+        show(
+            "亚秒区间表态",
+            api.post(
+                f"/cargo/{sc}/responsibilities/ss-m0/stances",
+                json={"snapshot_id": snap,
+                      "responsible_party": "上海冷库",
+                      "stance": "confirm", "stance_id": "ss-st-1"},
+            ),
+        )
+        show(
+            "亚秒区间封存",
+            api.post(
+                "/evidence-seals",
+                json={"case_id": "CASE-SUBSEC-1", "cargo_id": sc,
+                      "interval_id": "ss-m0", "snapshot_id": snap},
+            ),
+        )
+
+        show(
+            "补录 10:00:01.100 正常读数（区间提前闭合）",
+            api.post(
+                "/events",
+                json={"event_id": "ss-m1", "cargo_id": sc,
+                      "occurred_at": "2026-10-05T10:00:01.100+08:00",
+                      "temperature": "3.1"},
+            ),
+        )
+        iv2 = api.get(f"/cargo/{sc}/responsibilities/ss-m0").json()
+        print("\n== 补录后：end 提前到 .100、snapshot 已变 ==")
+        print("    end =", iv2["end"])
+        print("    snapshot changed =", iv2["snapshot_id"] != snap)
+        stale = api.post(
+            f"/cargo/{sc}/responsibilities/ss-m0/stances",
+            json={"snapshot_id": snap,
+                  "responsible_party": "上海冷库",
+                  "stance": "confirm", "stance_id": "ss-st-old"},
+        )
+        print("    沿用旧快照表态 ->", stale.status_code,
+              f"({stale.json()['error']['code']})")
+        hist = api.get(f"/cargo/{sc}/responsibilities/ss-m0/stances").json()
+        print("    旧表态 is_current =", hist["history"][0]["is_current"])
+        diff = api.get("/evidence-seals/CASE-SUBSEC-1/diff").json()
+        print("    封存对照 status =", diff["status"], "(changed，非 unchanged)")
+        sealed = api.get("/evidence-seals/CASE-SUBSEC-1").json()
+        print("    原封存包 end 不变 =",
+              sealed["content"]["interval"]["end"])
+
+
 if __name__ == "__main__":
     main()
+    subsecond_demo()

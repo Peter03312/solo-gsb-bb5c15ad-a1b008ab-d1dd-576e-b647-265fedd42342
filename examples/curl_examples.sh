@@ -1133,3 +1133,80 @@ curl -sS -o /dev/null -w "    货物不存在    HTTP %{http_code}\n" -G "$BASE/
   --data-urlencode "start_at=2026-10-11T06:00:00+08:00" \
   --data-urlencode "end_at=2026-10-11T20:00:00+08:00" \
   --data-urlencode "max_gap_seconds=7200"
+
+# ============================================================
+# 亚秒测温 / 交接：快照、表态有效性与封存对照按实际时刻区分
+# 场景：10:00:01.900 正常读数闭合并表态/封存，后补录 10:00:01.100
+#       正常读数使其提前闭合 -> 快照变、旧表态失效、旧快照被拒、
+#       封存对照 changed（不漏报 unchanged），原封存包不变。
+# ============================================================
+SS="COLD-SUBSEC-1"
+echo; echo "== 亚秒时刻示例（cargo=$SS） =="
+curl -sS -X POST "$BASE/cargo" -H 'Content-Type: application/json' -d "{
+  \"cargo_id\": \"$SS\",
+  \"started_at\": \"2026-10-05T09:00:00+08:00\",
+  \"temp_upper_limit\": \"4.0\",
+  \"initial_holder\": \"北京冷库\"
+}" | python3 -m json.tool
+# 亚秒超限测温 / 亚秒交接 / .900 正常闭合（字段与整秒完全相同）
+curl -sS -o /dev/null -X POST "$BASE/events" -H 'Content-Type: application/json' -d \
+  "{\"event_id\":\"ss-m0\",\"cargo_id\":\"$SS\",\"occurred_at\":\"2026-10-05T10:00:00.000+08:00\",\"temperature\":\"8.2\"}"
+curl -sS -o /dev/null -X POST "$BASE/events" -H 'Content-Type: application/json' -d \
+  "{\"event_id\":\"ss-h0\",\"cargo_id\":\"$SS\",\"occurred_at\":\"2026-10-05T10:00:00.500+08:00\",\"giver\":\"北京冷库\",\"receiver\":\"上海冷库\"}"
+curl -sS -o /dev/null -X POST "$BASE/events" -H 'Content-Type: application/json' -d \
+  "{\"event_id\":\"ss-m9\",\"cargo_id\":\"$SS\",\"occurred_at\":\"2026-10-05T10:00:01.900+08:00\",\"temperature\":\"3.1\"}"
+SSNAP=$(curl -sS "$BASE/cargo/$SS/responsibilities/ss-m0" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["snapshot_id"])')
+echo "    .900 闭合区间当前快照：$SSNAP"
+curl -sS -X POST "$BASE/cargo/$SS/responsibilities/ss-m0/stances" \
+  -H 'Content-Type: application/json' -d "{
+    \"snapshot_id\": \"$SSNAP\",
+    \"responsible_party\": \"上海冷库\",
+    \"stance\": \"confirm\",
+    \"stance_id\": \"ss-st-1\"
+  }" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("    表态已接受:", d.get("stance_id"))'
+curl -sS -o /dev/null -X POST "$BASE/evidence-seals" \
+  -H 'Content-Type: application/json' -d "{
+    \"case_id\": \"CASE-SUBSEC-1\",
+    \"cargo_id\": \"$SS\",
+    \"interval_id\": \"ss-m0\",
+    \"snapshot_id\": \"$SSNAP\"
+  }"
+echo "    已按 .900 快照封存 CASE-SUBSEC-1"
+# 补录同整秒内更早的正常读数 -> 提前闭合
+curl -sS -o /dev/null -X POST "$BASE/events" -H 'Content-Type: application/json' -d \
+  "{\"event_id\":\"ss-m1\",\"cargo_id\":\"$SS\",\"occurred_at\":\"2026-10-05T10:00:01.100+08:00\",\"temperature\":\"3.1\"}"
+curl -sS "$BASE/cargo/$SS/responsibilities/ss-m0" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("    补录后 end =", d["end"], "（提前到 .100），快照已变 =", d["snapshot_id"] != "'"$SSNAP"'")'
+echo "    沿用旧快照表态 / 封存："
+curl -sS -w "\n    stance HTTP %{http_code} -> " -o /tmp/ss_st.json -X POST "$BASE/cargo/$SS/responsibilities/ss-m0/stances" \
+  -H 'Content-Type: application/json' -d "{
+    \"snapshot_id\": \"$SSNAP\",
+    \"responsible_party\": \"上海冷库\",
+    \"stance\": \"confirm\",
+    \"stance_id\": \"ss-st-old\"
+  }"; python3 -c 'import json; print(json.load(open("/tmp/ss_st.json"))["error"]["code"])'
+curl -sS -w "    seal   HTTP %{http_code} -> " -o /tmp/ss_seal.json -X POST "$BASE/evidence-seals" \
+  -H 'Content-Type: application/json' -d "{
+    \"case_id\": \"CASE-SUBSEC-STALE\",
+    \"cargo_id\": \"$SS\",
+    \"interval_id\": \"ss-m0\",
+    \"snapshot_id\": \"$SSNAP\"
+  }"; python3 -c 'import json; print(json.load(open("/tmp/ss_seal.json"))["error"]["code"])'
+curl -sS "$BASE/cargo/$SS/responsibilities/ss-m0/stances" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("    旧表态 is_current =", d["history"][0]["is_current"])'
+echo "    封存现况对照（原包不改）："
+curl -sS "$BASE/evidence-seals/CASE-SUBSEC-1/diff" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("    status =", d["status"])
+for x in d["segment_changes"]:
+    print("    片段变化 start =", x["start"], "change =", x["change"],
+          "end", x["sealed"][1], "->", x["current"][1])'
+curl -sS "$BASE/evidence-seals/CASE-SUBSEC-1" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+print("    原封存包 end 不变 =", d["content"]["interval"]["end"], "，摘要 =", d["content_digest"][:18], "…")'

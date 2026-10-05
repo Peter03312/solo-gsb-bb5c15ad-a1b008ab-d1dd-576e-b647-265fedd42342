@@ -26,8 +26,9 @@
     content_digest = "sha256:" + hex(sha256(canonical_json))
 
 规范化 JSON 为单行、无多余空白（``separators=(",", ":")``），非 ASCII 不转义；
-时间统一为 UTC ISO 8601 秒级（``YYYY-MM-DDTHH:MM:SSZ``），温度量化到
-千分位十进制字符串。封存包原文与摘要一同落库，此后不可改。
+时间统一为 UTC ISO 8601（整秒 ``YYYY-MM-DDTHH:MM:SSZ``；带亚秒的时刻保留
+微秒 ``YYYY-MM-DDTHH:MM:SS.ffffffZ``，同一整秒内的亚秒边界变化计入摘要），
+温度量化到千分位十进制字符串。封存包原文与摘要一同落库，此后不可改。
 
 现况对照（diff）
 ----------------
@@ -69,7 +70,7 @@ from decimal import Decimal
 
 from app import chain, responsibility as resp, timeline
 from app.chain import interval_id
-from app.timeutil import ensure_utc
+from app.timeutil import canonical_ts, ensure_utc
 
 # 封存后现况状态
 STATUS_UNCHANGED = "unchanged"        # 区间仍闭合且快照相同
@@ -89,9 +90,14 @@ _TEMP_SCALE = Decimal("0.001")
 
 
 def ts(dt) -> str:
-    """UTC ISO 8601 秒级，Z 后缀（封存内容时间的统一表示）。"""
-    dt = ensure_utc(dt).replace(microsecond=0)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC ISO 8601，Z 后缀（封存内容时间的统一表示）。
+
+    整秒时刻保持秒级格式 ``YYYY-MM-DDTHH:MM:SSZ``（与既有封存包逐字节
+    一致，旧摘要不变）；带亚秒的时刻保留微秒
+    ``YYYY-MM-DDTHH:MM:SS.ffffffZ``——封存证据按实际测温 / 交接时刻区分
+    同一整秒内的亚秒变化（见 :func:`app.timeutil.canonical_ts`）。
+    """
+    return canonical_ts(dt)
 
 
 def temp(value) -> str:
@@ -368,7 +374,8 @@ def build_seal_payload(
     :param ex: 已闭合区间 :class:`app.chain.ExcursionResult`。
     :param interval_view: :meth:`responsibility.build_interval_view` 的视图
         （提供当时各责任方最新有效表态）。
-    :param sealed_at: 封存时刻（datetime，统一转 UTC 秒级）。
+    :param sealed_at: 封存时刻（datetime，统一转 UTC；整秒秒级 Z、亚秒
+        保留微秒）。
     :param reading_quarantine: 车载读数ID -> 生效探头故障编号元组；
         被覆盖的读数不参与重建（adopted=false / quarantined=true），但仍
         计入封存证据并附覆盖故障编号，供核对隔离依据。

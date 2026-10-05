@@ -12,7 +12,9 @@
 
 规范化 JSON 为单行、无多余空白、键固定按
 ``[start, end, segments: [[start, end, responsible_party], ...]]``
-排列，时间统一为 UTC ISO 8601（``YYYY-MM-DDTHH:MM:SSZ``）。
+排列，时间统一为 UTC ISO 8601（整秒 ``YYYY-MM-DDTHH:MM:SSZ``；带亚秒的
+时刻为 ``YYYY-MM-DDTHH:MM:SS.ffffffZ``，见 :func:`app.timeutil.canonical_ts`）。
+亚秒边界变化因此改变快照标识；整秒时刻的快照标识与历史格式逐字节一致。
 
 表态有效性（晚到事件 / 晚到车载读数重建后）
 -------------------------------------------
@@ -35,7 +37,7 @@ from decimal import Decimal
 
 from app.chain import ExcursionResult, interval_id
 from app.models import Stance, StanceKind
-from app.timeutil import ensure_utc
+from app.timeutil import canonical_ts, ensure_utc
 
 # 汇总状态
 ALL_CONFIRMED = "all_confirmed"  # 全部责任方均已确认
@@ -44,9 +46,9 @@ PENDING = "pending"              # 尚有责任方未表态（且无异议）
 
 
 def _ts(dt: datetime) -> str:
-    """UTC ISO 8601 秒级，Z 后缀（与对外时间格式一致）。"""
-    dt = ensure_utc(dt).replace(microsecond=0)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC ISO 8601，Z 后缀；整秒保持秒级格式，亚秒保留微秒（与对外时间
+    格式一致），快照 / 表态坐标按实际时刻区分同一整秒内的变化。"""
+    return canonical_ts(dt)
 
 
 def _segment_triples(segments) -> list:
@@ -137,6 +139,12 @@ def is_stance_current(stance: Stance, ex: ExcursionResult | None) -> bool:
     * 区间不存在 / 未闭合 / 区间标识变化（开启读数来源或坐标变化）→ False；
     * 表态时该责任方的片段坐标与当前不一致（边界或责任片段变化）→ False；
     * 区间标识与片段坐标完全一致（未受晚到记录影响）→ True。
+
+    片段坐标以**实际时刻**（含亚秒）规范化：补录测温在同一整秒内提前 /
+    推后边界（如闭合时刻由 10:00:01.900 变为 10:00:01.100）时，旧表态
+    坐标与当前坐标字符串不同，一律判为失效。历史表态行写入时坐标已被
+    截为整秒（丢失精度），凡当前片段含亚秒坐标的，无法证实片段仍相同，
+    同样返回 False——不会因“整秒相等”而误认旧表态有效。
     """
     if ex is None or ex.is_open:
         return False

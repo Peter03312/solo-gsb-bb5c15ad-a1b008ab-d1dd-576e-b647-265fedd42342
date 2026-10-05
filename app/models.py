@@ -303,7 +303,9 @@ class Stance(Base):
     snapshot_id: Mapped[str] = mapped_column(String(71), nullable=False)
     # 表态时该责任方承担的片段坐标（规范化 JSON：[[start,end,party],...]）。
     # 晚到事件重建后据此逐片段判定表态是否仍有效（未变化片段继续有效）。
-    attested_segments: Mapped[str] = mapped_column(String(2000), nullable=False)
+    # 坐标保留亚秒（整秒为秒级 Z、亚秒带六位微秒），多片段时较旧秒级格式
+    # 更长，故容量放宽至 4000。
+    attested_segments: Mapped[str] = mapped_column(String(4000), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -126,8 +126,9 @@ CREATE TABLE IF NOT EXISTS responsibility_stance (
     -- 提交时校验通过的快照标识（sha256:<hex>）；区间/片段变化后与当前快照不再一致
     snapshot_id         VARCHAR(71)   NOT NULL,
     -- 表态时该责任方承担的片段坐标 JSON（[["起","止","责任方"],...]），
-    -- 晚到事件/读数重建后逐片段判定表态是否仍有效
-    attested_segments   VARCHAR(2000) NOT NULL,
+    -- 晚到事件/读数重建后逐片段判定表态是否仍有效；坐标保留亚秒（整秒为
+    -- 秒级 Z、亚秒带六位微秒），多片段时较长，容量放宽至 4000
+    attested_segments   VARCHAR(4000) NOT NULL,
     created_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
 
     -- 表态形状：确认不得带理由；异议必须带非空理由
